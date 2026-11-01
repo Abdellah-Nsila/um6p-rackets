@@ -1,0 +1,75 @@
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Who caused the notification?
+enum SenderType {
+  SYSTEM
+  USER
+}
+
+// What area of the application does it belong to?
+enum NotificationCategory {
+  CLUB
+  USER
+}
+
+// What exactly happened?
+enum NotificationType {
+  JOIN_REQUESTED
+  JOIN_ACCEPTED
+  JOIN_REJECTED
+  CLUB_ANNOUNCEMENT
+}
+
+model Notification {
+  id       BigInt @id @default(autoincrement())
+  event_id String @unique @map("event_id")
+
+  // Sender identity and display snapshot
+  sender_type       SenderType @map("sender_type")
+  sender_id         BigInt?    @map("sender_id")
+  sender_name       String?    @map("sender_name")
+  sender_avatar_url String?    @map("sender_avatar_url")
+
+  // Notification classification
+  category NotificationCategory
+  type     NotificationType
+
+  // Related club identity and display snapshot
+  club_id   BigInt? @map("club_id")
+  club_name String? @map("club_name")
+
+  // Event creation time
+  sent_at DateTime @default(now()) @map("sent_at") @db.Timestamptz(6)
+
+  // Per-user delivery and read records
+  receivers NotificationReceiver[]
+
+  @@index([category, id(sort: Desc)])
+  @@index([club_id, id(sort: Desc)])
+  @@map("notifications")
+}
+
+model NotificationReceiver {
+  id BigInt @id @default(autoincrement())
+
+  notification_id BigInt @map("notification_id")
+  receiver_user_id BigInt @map("receiver_user_id")
+
+  is_read Boolean   @default(false) @map("is_read")
+  read_at DateTime? @map("read_at") @db.Timestamptz(6)
+
+  notification Notification @relation( fields: [notification_id], references: [id], onDelete: Cascade )
+
+  @@unique([notification_id, receiver_user_id])
+  @@index([receiver_user_id, id(sort: Desc)])
+  @@index([receiver_user_id, is_read])
+  @@map("notification_receivers")
+}

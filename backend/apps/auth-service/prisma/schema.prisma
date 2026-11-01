@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  login         String   @unique @db.VarChar(255)
+  first_name    String   @db.VarChar(255)
+  last_name     String   @db.VarChar(255)
+  gender        Boolean?
+  department    String?
+  phone_number  String?  @db.VarChar(50)
+  email         String   @unique @db.VarChar(255)
+  avatar        String?
+  password_hash String?
+  role          UserRole @default(USER)
+  joined_at     DateTime @default(now()) @db.Timestamptz(6)
+  deleted_at    DateTime? @db.Timestamptz(6)
+  // For refresh token functionality
+  refresh_tokens RefreshToken[]
+  // For OAuth2 identities (Google)
+  identities    Identity[]
+  // For password reset functionality
+  reset_token_hash   String?
+  reset_token_expiry DateTime?
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id         Int      @id @default(autoincrement())
+  token_hash String   @unique @db.VarChar(64) // SHA-256 hashes are exactly 64 hex characters
+  family_id  String   @db.Uuid
+  is_revoked Boolean  @default(false)
+  expires_at DateTime @db.Timestamptz(6)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  user_id    Int
+
+  // Foreign key linking to the User model
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Identity {
+  id        String   @id @default(uuid()) @db.Uuid
+  provider  String
+  subject   String
+  user_id   Int
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([user_id])
+  @@map("identities")
+}

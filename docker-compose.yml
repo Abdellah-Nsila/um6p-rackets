@@ -1,0 +1,409 @@
+# ========================================== Shared Backend Template ==========================================
+x-backend-template: &backend-template # We can now Injects the entire shared block! [DRY principle]
+  pull_policy: build
+  networks:
+    - ft_network
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+    database:
+      condition: service_healthy
+  restart: unless-stopped
+
+x-backend-env: &backend-env
+  NODE_ENV: production
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USER: ${RABBITMQ_USER}
+  RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+
+x-auth-env: &auth-env
+  <<: *backend-env
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${AUTH_USER}
+  DB_SCHEMA: ${AUTH_SCHEMA}
+  DB_PASSWORD_FILE: /run/secrets/auth_service_password
+  JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN}
+  JWT_ACCESS_SECRET_FILE: /run/secrets/jwt_access_secret
+  FRONTEND_URL: ${FRONTEND_URL}
+  SMTP_HOST: ${SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT}
+  SMTP_SECURE: ${SMTP_SECURE}
+  SMTP_USER: ${SMTP_USER}
+  SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+  SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+
+x-club-env: &club-env
+  <<: *backend-env
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${CLUB_USER}
+  DB_SCHEMA: ${CLUB_SCHEMA}
+  DB_PASSWORD_FILE: /run/secrets/club_service_password
+
+x-notification-env: &notification-env
+  <<: *backend-env
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${NOTIFICATION_USER}
+  DB_SCHEMA: ${NOTIFICATION_SCHEMA}
+  DB_PASSWORD_FILE: /run/secrets/notification_service_password
+  FRONTEND_URL: ${FRONTEND_URL}
+
+services:
+  # ========================================== Database ==========================================
+  database:
+    build:
+      context: ./infrastructure/database
+    pull_policy: build
+    image: "database"
+    container_name: database
+    secrets:
+      - db_password
+      - auth_service_password
+      - club_service_password
+      - notification_service_password
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      AUTH_USER: ${AUTH_USER}
+      CLUB_USER: ${CLUB_USER}
+      NOTIFICATION_USER: ${NOTIFICATION_USER}
+      AUTH_SCHEMA: ${AUTH_SCHEMA}
+      CLUB_SCHEMA: ${CLUB_SCHEMA}
+      NOTIFICATION_SCHEMA: ${NOTIFICATION_SCHEMA}
+      APP_ENV: ${APP_ENV}
+    networks:
+      - ft_network
+    ports:
+      - 5432:5432
+    volumes:
+      - database_vol:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+  
+  # ========================================== Rabbitmq ==========================================
+  rabbitmq:
+    build:
+      context: ./infrastructure/rabbitmq
+    pull_policy: build
+    image: "rabbitmq"
+    container_name: rabbitmq
+    secrets:
+      - rabbitmq_password
+    environment:
+      RABBITMQ_USER: ${RABBITMQ_USER}
+    ports:
+      - "5672:5672" # (AMQP Protocol): This is the "Engine" port. It uses a highly efficient, binary messaging protocol
+    networks:
+      - bridge_network
+      - ft_network
+    volumes:
+    - rabbitmq_vol:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+# ========================================== API Gateway ==========================================
+  api_gateway:
+    build:
+      context: ./backend
+      args:
+        APP_NAME: api-gateway
+    pull_policy: build
+    image: "api-gateway"
+    container_name: api-gateway
+    networks:
+      - ft_network
+    environment:
+        <<: *backend-env
+        JWT_ACCESS_SECRET_FILE: /run/secrets/jwt_access_secret
+        JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN}
+        FRONTEND_URL: ${FRONTEND_URL}
+        GOOGLE_CLIENT_ID_FILE: /run/secrets/google_client_id
+        GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
+        GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+        FRONTEND_REDIRECT_URL: ${FRONTEND_URL}
+    secrets:
+      - rabbitmq_password
+      - jwt_access_secret
+      - google_client_id
+      - google_client_secret
+    # INDUSTRY STANDARD: Gateway ONLY depends on the message broker, nothing else.
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3010/api/v1/auth/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ========================================== Authentication ==========================================
+  auth:
+    <<: *backend-template
+    build:
+      context: ./backend
+      args:
+        APP_NAME: auth-service
+    pull_policy: build
+    image: 'auth-service'
+    container_name: auth-service
+    environment: *auth-env
+    secrets: 
+      - rabbitmq_password
+      - auth_service_password
+      - jwt_access_secret
+      - smtp_password
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+      auth_migrate:
+        condition: service_completed_successfully
+
+  auth_migrate:
+    build:
+      context: ./backend
+      target: migrate
+      args:
+        APP_NAME: auth-service
+    pull_policy: build
+    image: auth-migrate
+    container_name: auth-migrate
+    networks: [ft_network]
+    environment: *auth-env
+    secrets: [rabbitmq_password, auth_service_password]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+
+  auth_seed:
+    build:
+      context: ./backend
+      target: seed
+      args:
+        APP_NAME: auth-service
+    pull_policy: build
+    image: auth-seed
+    container_name: auth-seed
+    networks: [ft_network]
+    environment: *auth-env
+    secrets: [rabbitmq_password, auth_service_password]
+    depends_on:
+      auth_migrate:
+        condition: service_completed_successfully
+    restart: "no"
+  
+
+  # ========================================== Club ==========================================
+  club:
+    <<: *backend-template
+    build:
+      context: ./backend
+      args:
+        APP_NAME: club-service
+    pull_policy: build
+    image: "club-service"
+    container_name: club-service
+    environment: *club-env
+    secrets: [rabbitmq_password, club_service_password]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+      club_migrate:
+        condition: service_completed_successfully
+
+  club_migrate:
+    build:
+      context: ./backend
+      target: migrate
+      args:
+        APP_NAME: club-service
+    pull_policy: build
+    image: club-migrate
+    container_name: club-migrate
+    networks: [ft_network]
+    environment: *club-env
+    secrets: [rabbitmq_password, club_service_password]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+
+  club_seed:
+    build:
+      context: ./backend
+      target: seed
+      args:
+        APP_NAME: club-service
+    pull_policy: build
+    image: club-seed
+    container_name: club-seed
+    networks: [ft_network]
+    environment: *club-env
+    secrets: [rabbitmq_password, club_service_password]
+    depends_on:
+      club_migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # ========================================== Notification ==========================================
+
+  notification:
+    <<: *backend-template
+    build:
+      context: ./backend
+      args:
+        APP_NAME: notification-service
+    pull_policy: build
+    image: "notification-service"
+    container_name: notification-service
+    environment:
+      <<: *notification-env
+    secrets: [rabbitmq_password, notification_service_password]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+      notification_migrate:
+        condition: service_completed_successfully
+
+
+  notification_migrate:
+    build:
+      context: ./backend
+      target: migrate
+      args:
+        APP_NAME: notification-service
+    pull_policy: build
+    image: notification-migrate
+    container_name: notification-migrate
+    networks: [ft_network]
+    environment: *notification-env
+    secrets: [rabbitmq_password, notification_service_password]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+
+  notification_seed:
+    build:
+      context: ./backend
+      target: seed
+      args:
+        APP_NAME: notification-service
+    pull_policy: build
+    image: notification-seed
+    container_name: notification-seed
+    networks: [ft_network]
+    environment: *notification-env
+    secrets: [rabbitmq_password, notification_service_password]
+    depends_on:
+      notification_migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+    # ========================================== nginx ==========================================
+  nginx:
+    build:
+      context: ./infrastructure/nginx
+    pull_policy: build
+    image: "nginx"
+    container_name: nginx
+    ports:
+      - 443:443
+    networks:
+      - bridge_network
+      - ft_network
+    depends_on:
+      api_gateway:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ========================================== Frontend ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      args: # MUST pass as build args for Next.js to bake them into the JS
+        NEXT_PUBLIC_API_URL: ${FRONTEND_URL}
+        NEXT_PUBLIC_API_PREFIX: ${NEXT_PUBLIC_API_PREFIX}
+    pull_policy: build
+    image: "frontend"
+    container_name: frontend
+    networks:
+      - ft_network
+    depends_on:
+      api_gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.status < 400 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+
+# ========================================== Networks, Volumes and Secrets ==========================================
+
+networks:
+  ft_network:
+    driver: bridge
+    name: "ft_network"
+    # internal: true // Uncomment this line for production
+  bridge_network:
+    driver: bridge
+    name: "bridge_network"
+
+volumes:
+  database_vol:
+    name: database_vol
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '${HOME}/data/database'
+  rabbitmq_vol:
+    name: rabbitmq_vol
+    driver: local
+    driver_opts:
+      type: 'none'
+      o: 'bind'
+      device: '${HOME}/data/rabbitmq'
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  auth_service_password:
+    file: ./secrets/auth_service_password.txt
+  club_service_password:
+    file: ./secrets/club_service_password.txt
+  notification_service_password:
+    file: ./secrets/notification_service_password.txt
+  rabbitmq_password:
+    file: ./secrets/rabbitmq_password.txt
+  jwt_access_secret:
+    file: ./secrets/jwt_access_secret.txt
+  google_client_id:
+    file: ./secrets/google_client_id.txt
+  google_client_secret:
+    file: ./secrets/google_client_secret.txt
+  smtp_password:
+    file: ./secrets/smtp_password.txt
