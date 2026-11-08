@@ -1,4 +1,4 @@
-*This project has been created as part of the 42 curriculum by ablabib, abnsila, hwahmane, znajdaou.*
+*This project has been created as part of the 42 curriculum by abnsila, ablabib, hwahmane, znajdaou.*
 
 # UM6P Rackets
 
